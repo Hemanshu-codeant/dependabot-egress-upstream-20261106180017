@@ -1,3 +1,3 @@
 module DbEgressCanary
-  VALUE = "control"
+  VALUE = "canary"
 end
