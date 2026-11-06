@@ -1,1 +1,1 @@
-VALUE = "control"
+VALUE = "canary"
